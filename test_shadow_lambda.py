@@ -1,5 +1,9 @@
+import pytest
 import json
 from shadow_lambda import CompareOptions, JsonComparator
+
+def _collect_issues(diffs):
+    return [d["issue"] for d in diffs]
 
 NEXTGEN_RESPONSE = json.loads(
     """
@@ -820,6 +824,46 @@ LEGACY_RESPONSE = json.loads(
 """
 )
 
+def test_unordered_lists_surface_nested_differences():
+    comparator = JsonComparator(CompareOptions(list_mode="unordered"))
+    satsource = [
+        {"id": "farm-002", "metrics": {"yield": 1.1, "history": [1, 2]}},
+        {"id": "farm-001", "metrics": {"yield": 2.2, "history": [3, 4]}},
+    ]
+    legacy = [
+        {"id": "farm-001", "metrics": {"yield": 2.2, "history": [3, 5]}},
+        {"id": "farm-002", "metrics": {"yield": 1.1, "history": [1, 2]}},
+    ]
+
+    comparator.compare(satsource, legacy)
+    diffs = comparator.result()["differences"]
+
+    nested_paths = {d["path"] for d in diffs}
+    assert "$[0].metrics.history[1]" in nested_paths
+
+    issues = _collect_issues(diffs)
+    assert any("extra element in A" in issue for issue in issues)
+    assert any("missing element in A" in issue for issue in issues)
+
+
+def test_unordered_lists_still_report_unmatched_elements():
+    comparator = JsonComparator(CompareOptions(list_mode="unordered"))
+    satsource = [
+        {"id": "only-in-satsource"},
+        {"id": "shared", "data": 1},
+    ]
+    legacy = [
+        {"id": "shared", "data": 2},
+        {"id": "only-in-legacy"},
+    ]
+
+    comparator.compare(satsource, legacy)
+    diffs = comparator.result()["differences"]
+
+    issues = _collect_issues(diffs)
+    assert any("extra element in A" in issue for issue in issues)
+    assert any("missing element in A" in issue for issue in issues)
+    assert any(issue.startswith("number mismatch") for issue in issues)
 
 def _run_comparison(list_mode: str = "ordered"):
     options = CompareOptions(list_mode=list_mode, label_a="satsource", label_b="legacy")
