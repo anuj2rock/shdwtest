@@ -27,6 +27,19 @@ def legacy_key(request_id: str, ref_id: str) -> str:
     # e.g. farm-reports/<req-id-uuid>/<refid>.json
     return f"farm-reports/{request_id}/{ref_id}.json"
 
+def diff_report_key(request_id: str, ref_id: str) -> str:
+    # e.g. farm-reports/diff/<req-id-uuid>/diff_<refid>.json
+    return f"farm-reports/diff/{request_id}/diff_{ref_id}.json"
+
+
+def nextgen_archive_key(request_id: str, ref_id: str) -> str:
+    # e.g. farm-reports/nextgen/<req-id-uuid>/nextgen_<refid>.json
+    return f"farm-reports/nextgen/{request_id}/nextgen_{ref_id}.json"
+
+
+def legacy_archive_key(request_id: str, ref_id: str) -> str:
+    # e.g. farm-reports/legacy/<req-id-uuid>/legacy_<refid>.json
+    return f"farm-reports/legacy/{request_id}/legacy_{ref_id}.json"
 
 # ---------- Utilities ----------
 def _is_number(x: Any) -> bool:
@@ -195,6 +208,13 @@ class S3JsonLoader:
             ContentType="application/json",
         )
 
+    def copy_object(self, source_key: str, dest_key: str):
+        self.s3.copy_object(
+            Bucket=self.bucket,
+            Key=dest_key,
+            CopySource={"Bucket": self.bucket, "Key": source_key},
+        )
+
 
 @dataclass
 class ShadowTestConfig:
@@ -245,9 +265,16 @@ class ShadowTester:
         }
 
         if self.cfg.write_report:
-            report_key = f"farm-reports/{self.cfg.request_id}/shadow-diff_{self.cfg.ref_id}.json"
+            report_key = diff_report_key(self.cfg.request_id, self.cfg.ref_id)
             self.loader.write_json(report_key, result)
             result["reportKey"] = report_key
+
+            nextgen_key = nextgen_archive_key(self.cfg.request_id, self.cfg.ref_id)
+            legacy_archive = legacy_archive_key(self.cfg.request_id, self.cfg.ref_id)
+            self.loader.copy_object(key_satsource, nextgen_key)
+            self.loader.copy_object(key_legacy, legacy_archive)
+            result["nextgenCopyKey"] = nextgen_key
+            result["legacyCopyKey"] = legacy_archive
 
         return result
 
