@@ -379,14 +379,13 @@ def lambda_handler(event, context):
               or os.getenv("BUCKET_NAME"))
     if not bucket:
         bucket = "satsure-sage-media"
-    try:
-        request_id = event["request_id"]
-    except Exception as e:
-        KeyError("'request_id' not provided as part of lambda event")
-    try:
-        ref_id = event["ref_id"]
-    except Exception as e:
-        KeyError("'ref_id' not provided as part of lambda event")
+    if "request_id" not in event:
+        raise KeyError("'request_id' not provided as part of lambda event")
+    request_id = event["request_id"]
+
+    if "ref_id" not in event:
+        raise KeyError("'ref_id' not provided as part of lambda event")
+    ref_id = event["ref_id"]
 
     epsilon = float(event.get("epsilon") or os.getenv("EPSILON", "1e-3"))
     list_mode = (event.get("list_mode") or os.getenv("LIST_MODE", "ordered")).strip().lower()
