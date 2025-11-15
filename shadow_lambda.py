@@ -113,10 +113,10 @@ class JsonComparator:
         ka, kb = set(a.keys()), set(b.keys())
         for k in sorted(ka - kb):
             if not self.options.should_ignore(f"{path}.{k}"):
-                self._add(path, f"extra key in A: {k}")
+                self._add(path, f"extra key in satsource (missing in legacy): {k}")
         for k in sorted(kb - ka):
             if not self.options.should_ignore(f"{path}.{k}"):
-                self._add(path, f"missing key in A (present in B): {k}")
+                self._add(path, f"missing key in satsource (present in legacy): {k}")
         for k in sorted(ka & kb):
             self.compare(a[k], b[k], f"{path}.{k}")
 
@@ -132,9 +132,9 @@ class JsonComparator:
             ca = Counter(_json_dump_compact(x) for x in a)
             cb = Counter(_json_dump_compact(x) for x in b)
             for k in sorted((ca - cb).elements()):
-                self._add(path, f"extra element in A: {k}")
+                self._add(path, f"extra element in satsource (missing in legacy): {k}")
             for k in sorted((cb - ca).elements()):
-                self._add(path, f"missing element in A (present in B): {k}")
+                self._add(path, f"missing element in satsource (present in legacy): {k}")
 
     def _add(self, path: str, issue: str):
         self.diffs.append(DiffEntry(path=path, issue=issue))
