@@ -1,6 +1,30 @@
+import sys
+import types
 import pytest
 import json
-from shadow_lambda import CompareOptions, JsonComparator
+from shadow_lambda import (
+    CompareOptions,
+    FieldTolerance,
+    JsonComparator,
+    ShadowTestConfig,
+    ShadowTester,
+    legacy_key,
+    satsource_key,
+    lambda_handler,
+)
+
+# Provide a lightweight stand-in for boto3 so importing shadow_lambda does not
+# fail in environments where boto3 is unavailable during tests.
+stub_boto3 = types.ModuleType("boto3")
+
+
+def _unused_client(*args, **kwargs):  # pragma: no cover - defensive stub
+    raise AssertionError("boto3.client should not be invoked in these tests")
+
+
+stub_boto3.client = _unused_client
+sys.modules.setdefault("boto3", stub_boto3)
+
 
 def _collect_issues(diffs):
     return [d["issue"] for d in diffs]
@@ -823,6 +847,79 @@ LEGACY_RESPONSE = json.loads(
 }
 """
 )
+
+class DummyLoader:
+    def __init__(self, payloads):
+        self.payloads = payloads
+        self.loaded_keys = []
+
+    def load_json(self, key):
+        self.loaded_keys.append(key)
+        if key not in self.payloads:
+            raise KeyError(key)
+        return json.loads(json.dumps(self.payloads[key]))
+
+def test_lambda_handler_missing_request_id_raises_key_error():
+    event = {"ref_id": "123"}
+
+    with pytest.raises(KeyError) as excinfo:
+        lambda_handler(event, None)
+
+    assert "request_id" in str(excinfo.value)
+
+
+def test_lambda_handler_missing_ref_id_raises_key_error():
+    event = {"request_id": "req-1"}
+
+    with pytest.raises(KeyError) as excinfo:
+        lambda_handler(event, None)
+
+    assert "ref_id" in str(excinfo.value)
+
+def test_comparator_path_tolerance_numeric_and_strings():
+    options = CompareOptions(
+        epsilon=0.01,
+        path_tolerances={
+            "$.foo": FieldTolerance(epsilon=0.2),
+            "$.status": FieldTolerance(allowed_values={"approved", "pending"}),
+        },
+    )
+    comparator = JsonComparator(options)
+    comparator.compare(
+        {"foo": 1.0, "status": "approved", "other": 0.0, "note": "A"},
+        {"foo": 1.15, "status": "pending", "other": 0.2, "note": "B"},
+    )
+
+    assert len(comparator.diffs) == 2
+    assert {d.path for d in comparator.diffs} == {"$.other", "$.note"}
+    assert any("number mismatch" in d.issue for d in comparator.diffs)
+    assert any("string mismatch" in d.issue for d in comparator.diffs)
+
+
+def test_shadow_tester_uses_tolerance_config(monkeypatch):
+    cfg = ShadowTestConfig(
+        bucket="bucket",
+        request_id="req",
+        ref_id="ref",
+        tolerance_config_key="configs/tolerance.json",
+    )
+    tester = ShadowTester(cfg)
+
+    legacy = {"foo": 1.0, "status": "alpha"}
+    v6 = {"foo": 1.05, "status": "beta"}
+    tolerance = {"foo": 0.2, "status": ["alpha", "beta"]}
+    payloads = {
+        legacy_key(cfg.request_id, cfg.ref_id): legacy,
+        satsource_key(cfg.request_id, cfg.ref_id): v6,
+        cfg.tolerance_config_key: tolerance,
+    }
+    dummy_loader = DummyLoader(payloads)
+    monkeypatch.setattr(tester, "loader", dummy_loader, raising=False)
+
+    result = tester.run()
+
+    assert cfg.tolerance_config_key in dummy_loader.loaded_keys
+    assert result["differenceCount"] == 0
 
 def test_unordered_lists_surface_nested_differences():
     comparator = JsonComparator(CompareOptions(list_mode="unordered"))
