@@ -147,6 +147,22 @@ class JsonComparator:
                 self._add(path, f"extra element in {label_a} (missing in {label_b}): {k}")
             for k in sorted((cb - ca).elements()):
                 self._add(path, f"missing element in {label_a} (present in {label_b}): {k}")
+            if not a or not b:
+                return
+
+            def sort_key(item: Any) -> str:
+                # _json_dump_compact already provides a deterministic representation
+                # for most JSON-serializable structures. Use repr as a fallback to
+                # keep ordering stable even for exotic objects.
+                try:
+                    return _json_dump_compact(item)
+                except TypeError:
+                    return repr(item)
+
+            a_sorted = sorted(a, key=sort_key)
+            b_sorted = sorted(b, key=sort_key)
+            for i, (item_a, item_b) in enumerate(zip(a_sorted, b_sorted)):
+                self.compare(item_a, item_b, f"{path}[{i}]")
 
     def _add(self, path: str, issue: str):
         self.diffs.append(DiffEntry(path=path, issue=issue))
