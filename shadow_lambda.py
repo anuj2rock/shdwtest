@@ -48,6 +48,26 @@ def _is_number(x: Any) -> bool:
 def _json_dump_compact(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
+def _normalize_bool_input(value: Any) -> Optional[bool]:
+    """Convert a variety of truthy inputs to bool, or None if unset."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    value_str = str(value).strip()
+    if not value_str:
+        return None
+    return value_str.lower() == "true"
+
+
+def _bool_from_event_or_env(event_value: Any, env_var: str, default: bool) -> bool:
+    event_bool = _normalize_bool_input(event_value)
+    if event_bool is not None:
+        return event_bool
+    env_bool = _normalize_bool_input(os.getenv(env_var))
+    if env_bool is not None:
+        return env_bool
+    return default
 
 def _normalize_path_key(path: str) -> Optional[str]:
     if not path:
@@ -389,7 +409,7 @@ def lambda_handler(event, context):
 
     epsilon = float(event.get("epsilon") or os.getenv("EPSILON", "1e-3"))
     list_mode = (event.get("list_mode") or os.getenv("LIST_MODE", "ordered")).strip().lower()
-    write_report = (event.get("write_report") or os.getenv("WRITE_REPORT", "true")).strip().lower() == "true"
+    write_report = _bool_from_event_or_env(event.get("write_report"), "WRITE_REPORT", False)
 
     ignore_paths = []
     ip_env = os.getenv("IGNORE_PATHS_JSON")
