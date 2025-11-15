@@ -3,7 +3,7 @@ import json
 import os
 import decimal
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple, Optional, Set
 try:
     import boto3
 except ModuleNotFoundError:  # pragma: no cover - exercised via tests without boto3 installed
@@ -48,11 +48,82 @@ def _is_number(x: Any) -> bool:
 def _json_dump_compact(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
+
+def _normalize_path_key(path: str) -> Optional[str]:
+    if not path:
+        return None
+    path = path.strip()
+    if not path:
+        return None
+    if path == "$":
+        return "$"
+    if path.startswith("$"):
+        if path.startswith("$."):
+            return path
+        path = path[1:]
+    path = path.lstrip('.')
+    if not path:
+        return "$"
+    return f"$.{path}"
+
+
+def _parse_tolerance_config(raw: Any) -> Dict[str, "FieldTolerance"]:
+    parsed: Dict[str, FieldTolerance] = {}
+    if not isinstance(raw, dict):
+        return parsed
+
+    for key, value in raw.items():
+        norm_key = _normalize_path_key(key)
+        if not norm_key:
+            continue
+        ft = _coerce_field_tolerance(value)
+        if ft:
+            parsed[norm_key] = ft
+    return parsed
+
+
+def _coerce_field_tolerance(value: Any) -> Optional["FieldTolerance"]:
+    epsilon: Optional[float] = None
+    allowed: Optional[Set[Any]] = None
+
+    if isinstance(value, dict):
+        if "epsilon" in value and value["epsilon"] is not None:
+            try:
+                epsilon = float(value["epsilon"])
+            except (TypeError, ValueError):
+                epsilon = None
+        allowed_values = value.get("allowed_values") or value.get("allowed_literals")
+        if isinstance(allowed_values, list):
+            allowed = set(allowed_values)
+        elif allowed_values is not None:
+            allowed = {allowed_values}
+    elif _is_number(value):
+        try:
+            epsilon = float(value)
+        except (TypeError, ValueError):
+            epsilon = None
+    elif isinstance(value, list):
+        allowed = set(value)
+    elif value is not None:
+        allowed = {value}
+
+    if epsilon is None and (allowed is None or len(allowed) == 0):
+        return None
+    if allowed is not None and len(allowed) == 0:
+        allowed = None
+    return FieldTolerance(epsilon=epsilon, allowed_values=allowed)
+
+@dataclass
+class FieldTolerance:
+    epsilon: Optional[float] = None
+    allowed_values: Optional[Set[Any]] = None
+
 @dataclass
 class CompareOptions:
     epsilon: float = 1e-3
     list_mode: str = "unordered"   # or "ordered"
     ignore_paths: List[str] = field(default_factory=list)
+    path_tolerances: Dict[str, FieldTolerance] = field(default_factory=dict)
     label_a: str = "A"
     label_b: str = "B"
     
@@ -60,6 +131,17 @@ class CompareOptions:
         # If any ignore prefix matches the current path, skip it.
         return any(path.startswith(prefix) for prefix in self.ignore_paths)
 
+    def tolerance_for(self, path: str) -> Tuple[float, Optional[Set[Any]]]:
+        epsilon = self.epsilon
+        allowed: Optional[Set[Any]] = None
+        ft = self.path_tolerances.get(path)
+        if ft:
+            if ft.epsilon is not None:
+                epsilon = ft.epsilon
+            if ft.allowed_values:
+                allowed = ft.allowed_values
+        return epsilon, allowed
+        
 
 @dataclass
 class DiffEntry:
@@ -87,7 +169,10 @@ class JsonComparator:
         if a is None and b is None:
             return
         # Type-based handling
+        epsilon, allowed_values = self.options.tolerance_for(path)
         if isinstance(a, bool) or isinstance(b, bool):
+            if allowed_values and a in allowed_values and b in allowed_values:
+                return
             if a is not b:
                 self._add(path, f"bool mismatch {a} != {b}")
             return
@@ -100,14 +185,16 @@ class JsonComparator:
                     self._add(path, f"number parse mismatch {a} != {b}")
                 return
             if math.isfinite(fa) and math.isfinite(fb):
-                if abs(fa - fb) > self.options.epsilon:
-                    self._add(path, f"number mismatch {fa} != {fb} (>|{self.options.epsilon}|)")
+                if abs(fa - fb) > epsilon:
+                    self._add(path, f"number mismatch {fa} != {fb} (>|{epsilon}|)")
             else:
                 if fa != fb:
                     self._add(path, f"number non-finite mismatch {fa} != {fb}")
             return
 
         if isinstance(a, str) and isinstance(b, str):
+            if allowed_values and a in allowed_values and b in allowed_values:
+                return
             if a != b:
                 self._add(path, f"string mismatch '{a}' != '{b}'")
             return
@@ -225,6 +312,7 @@ class ShadowTestConfig:
     list_mode: str = "ordered"
     ignore_paths: List[str] = field(default_factory=list)
     write_report: bool = False
+    tolerance_config_key: Optional[str] = None
 
 
 class ShadowTester:
@@ -244,6 +332,11 @@ class ShadowTester:
 
         legacy_json = self.loader.load_json(key_legacy)
         v6_json = self.loader.load_json(key_satsource)
+        
+        path_tolerances: Dict[str, FieldTolerance] = {}
+        if self.cfg.tolerance_config_key:
+            tolerance_raw = self.loader.load_json(self.cfg.tolerance_config_key)
+            path_tolerances = _parse_tolerance_config(tolerance_raw)
 
         options = CompareOptions(
             epsilon=self.cfg.epsilon,
@@ -251,6 +344,7 @@ class ShadowTester:
             ignore_paths=self.cfg.ignore_paths,
             label_a="satsource",
             label_b="legacy",
+            path_tolerances=path_tolerances,
         )
         comparator = JsonComparator(options)
         comparator.compare(v6_json, legacy_json, "$")
@@ -308,6 +402,8 @@ def lambda_handler(event, context):
         except Exception:
             pass
 
+    tolerance_config_key = event.get("tolerance_config_key") or os.getenv("TOLERANCE_CONFIG_KEY")
+    
     cfg = ShadowTestConfig(
         bucket=bucket,
         request_id=request_id,
@@ -316,6 +412,7 @@ def lambda_handler(event, context):
         list_mode=list_mode,
         ignore_paths=ignore_paths,
         write_report=write_report,
+        tolerance_config_key=tolerance_config_key,
     )
     tester = ShadowTester(cfg)
     result = tester.run()
