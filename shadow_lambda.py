@@ -4,7 +4,10 @@ import os
 import decimal
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
-import boto3
+try:
+    import boto3
+except ModuleNotFoundError:  # pragma: no cover - exercised via tests without boto3 installed
+    boto3 = None
 import math
 
 # ---------- Config ----------
@@ -159,6 +162,8 @@ class JsonComparator:
 class S3JsonLoader:
     def __init__(self, bucket: str):
         self.bucket = bucket
+        if boto3 is None:
+            raise RuntimeError("boto3 is required to use S3JsonLoader")
         self.s3 = boto3.client("s3")
 
     def load_json(self, key: str) -> Any:
