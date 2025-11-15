@@ -3,7 +3,7 @@ import json
 import os
 import decimal
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List
 import boto3
 import math
 
@@ -37,7 +37,9 @@ class CompareOptions:
     epsilon: float = 1e-3
     list_mode: str = "unordered"   # or "ordered"
     ignore_paths: List[str] = field(default_factory=list)
-
+    label_a: str = "A"
+    label_b: str = "B"
+    
     def should_ignore(self, path: str) -> bool:
         # If any ignore prefix matches the current path, skip it.
         return any(path.startswith(prefix) for prefix in self.ignore_paths)
@@ -110,20 +112,27 @@ class JsonComparator:
             self._add(path, f"value mismatch {a} != {b}")
 
     def _compare_dicts(self, a: Dict[str, Any], b: Dict[str, Any], path: str):
+        label_a = self.options.label_a
+        label_b = self.options.label_b
         ka, kb = set(a.keys()), set(b.keys())
         for k in sorted(ka - kb):
             if not self.options.should_ignore(f"{path}.{k}"):
-                self._add(path, f"extra key in satsource (missing in legacy): {k}")
+                self._add(path, f"extra key in {label_a} (missing in {label_b}): {k}")
         for k in sorted(kb - ka):
             if not self.options.should_ignore(f"{path}.{k}"):
-                self._add(path, f"missing key in satsource (present in legacy): {k}")
+                self._add(path, f"missing key in {label_a} (present in {label_b}): {k}")
         for k in sorted(ka & kb):
             self.compare(a[k], b[k], f"{path}.{k}")
 
     def _compare_lists(self, a: List[Any], b: List[Any], path: str):
+        label_a = self.options.label_a
+        label_b = self.options.label_b
         if self.options.list_mode == "ordered":
             if len(a) != len(b):
-                self._add(path, f"length mismatch {len(a)} != {len(b)}")
+                self._add(
+                    path,
+                    f"length mismatch: {label_a} has {len(a)} items, {label_b} has {len(b)} items",
+                )
             for i in range(min(len(a), len(b))):
                 self.compare(a[i], b[i], f"{path}[{i}]")
         else:
@@ -132,9 +141,9 @@ class JsonComparator:
             ca = Counter(_json_dump_compact(x) for x in a)
             cb = Counter(_json_dump_compact(x) for x in b)
             for k in sorted((ca - cb).elements()):
-                self._add(path, f"extra element in satsource (missing in legacy): {k}")
+                self._add(path, f"extra element in {label_a} (missing in {label_b}): {k}")
             for k in sorted((cb - ca).elements()):
-                self._add(path, f"missing element in satsource (present in legacy): {k}")
+                self._add(path, f"missing element in {label_a} (present in {label_b}): {k}")
 
     def _add(self, path: str, issue: str):
         self.diffs.append(DiffEntry(path=path, issue=issue))
@@ -199,6 +208,8 @@ class ShadowTester:
             epsilon=self.cfg.epsilon,
             list_mode=self.cfg.list_mode,
             ignore_paths=self.cfg.ignore_paths,
+            label_a="satsource",
+            label_b="legacy",
         )
         comparator = JsonComparator(options)
         comparator.compare(v6_json, legacy_json, "$")
