@@ -1,3 +1,4 @@
+from pathlib import Path
 import sys
 import types
 import pytest
@@ -12,6 +13,103 @@ from shadow_lambda import (
     satsource_key,
     lambda_handler,
 )
+
+class _FakeS3Client:
+    def get_object(self, *args, **kwargs):  # pragma: no cover - placeholder
+        raise NotImplementedError
+
+    def put_object(self, *args, **kwargs):  # pragma: no cover - placeholder
+        raise NotImplementedError
+
+
+def _fake_boto3_client(service_name):  # pragma: no cover - placeholder
+    return _FakeS3Client()
+
+sys.modules.setdefault("boto3", types.SimpleNamespace(client=_fake_boto3_client))
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import shadow_lambda
+
+def _call_lambda(event, monkeypatch):
+    captured_cfg = {}
+
+    class DummyTester:
+        def __init__(self, cfg):
+            captured_cfg["cfg"] = cfg
+
+        def run(self):
+            return {"differences": [], "differenceCount": 0}
+
+    monkeypatch.setattr(shadow_lambda, "ShadowTester", DummyTester)
+    response = shadow_lambda.lambda_handler(event, None)
+    return response, captured_cfg["cfg"]
+
+
+def test_lambda_handler_defaults_write_report_false(monkeypatch):
+    monkeypatch.delenv("WRITE_REPORT", raising=False)
+    event = {"bucket": "bucket", "request_id": "req", "ref_id": "ref"}
+
+    _, cfg = _call_lambda(event, monkeypatch)
+
+    assert cfg.write_report is False
+
+
+def test_lambda_handler_respects_env_override(monkeypatch):
+    monkeypatch.setenv("WRITE_REPORT", "true")
+    event = {"bucket": "bucket", "request_id": "req", "ref_id": "ref"}
+
+    _, cfg = _call_lambda(event, monkeypatch)
+
+    assert cfg.write_report is True
+
+
+def test_shadow_tester_writes_report_only_when_enabled(monkeypatch):
+    created_loaders = []
+
+    class DummyLoader:
+        def __init__(self, bucket):
+            self.bucket = bucket
+            self.write_calls = []
+
+        def load_json(self, key):
+            return {"value": 1}
+
+        def write_json(self, key, payload):
+            self.write_calls.append((key, payload))
+
+    def loader_factory(bucket):
+        loader = DummyLoader(bucket)
+        created_loaders.append(loader)
+        return loader
+
+    monkeypatch.setattr(shadow_lambda, "S3JsonLoader", loader_factory)
+
+    cfg_disabled = shadow_lambda.ShadowTestConfig(
+        bucket="bucket",
+        request_id="req",
+        ref_id="ref",
+        write_report=False,
+    )
+    tester_disabled = shadow_lambda.ShadowTester(cfg_disabled)
+    result_disabled = tester_disabled.run()
+
+    assert created_loaders[0].write_calls == []
+    assert "reportKey" not in result_disabled
+
+    cfg_enabled = shadow_lambda.ShadowTestConfig(
+        bucket="bucket",
+        request_id="req",
+        ref_id="ref",
+        write_report=True,
+    )
+    tester_enabled = shadow_lambda.ShadowTester(cfg_enabled)
+    result_enabled = tester_enabled.run()
+
+    assert len(created_loaders[1].write_calls) == 1
+    assert "reportKey" in result_enabled
 
 # Provide a lightweight stand-in for boto3 so importing shadow_lambda does not
 # fail in environments where boto3 is unavailable during tests.
