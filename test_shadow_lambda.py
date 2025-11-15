@@ -1,3 +1,5 @@
+import sys
+import types
 import pytest
 import json
 from shadow_lambda import (
@@ -8,7 +10,20 @@ from shadow_lambda import (
     ShadowTester,
     legacy_key,
     satsource_key,
+    lambda_handler,
 )
+
+# Provide a lightweight stand-in for boto3 so importing shadow_lambda does not
+# fail in environments where boto3 is unavailable during tests.
+stub_boto3 = types.ModuleType("boto3")
+
+
+def _unused_client(*args, **kwargs):  # pragma: no cover - defensive stub
+    raise AssertionError("boto3.client should not be invoked in these tests")
+
+
+stub_boto3.client = _unused_client
+sys.modules.setdefault("boto3", stub_boto3)
 
 
 def _collect_issues(diffs):
@@ -844,6 +859,22 @@ class DummyLoader:
             raise KeyError(key)
         return json.loads(json.dumps(self.payloads[key]))
 
+def test_lambda_handler_missing_request_id_raises_key_error():
+    event = {"ref_id": "123"}
+
+    with pytest.raises(KeyError) as excinfo:
+        lambda_handler(event, None)
+
+    assert "request_id" in str(excinfo.value)
+
+
+def test_lambda_handler_missing_ref_id_raises_key_error():
+    event = {"request_id": "req-1"}
+
+    with pytest.raises(KeyError) as excinfo:
+        lambda_handler(event, None)
+
+    assert "ref_id" in str(excinfo.value)
 
 def test_comparator_path_tolerance_numeric_and_strings():
     options = CompareOptions(
