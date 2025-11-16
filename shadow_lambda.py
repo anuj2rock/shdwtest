@@ -307,24 +307,77 @@ class S3JsonLoader:
         self.s3 = boto3.client("s3")
 
     def load_json(self, key: str) -> Any:
-        obj = self.s3.get_object(Bucket=self.bucket, Key=key)
-        data = obj["Body"].read()
-        return json.loads(data)
+        logger.info("event=s3_load_json bucket=%s key=%s", self.bucket, key)
+        try:
+            obj = self.s3.get_object(Bucket=self.bucket, Key=key)
+            data = obj["Body"].read()
+            size = len(data) if data is not None else 0
+            logger.debug(
+                "event=s3_load_json_payload bucket=%s key=%s size_bytes=%s",
+                self.bucket,
+                key,
+                size,
+            )
+            return json.loads(data)
+        except Exception:
+            logger.exception(
+                "event=s3_load_json_error bucket=%s key=%s",
+                self.bucket,
+                key,
+            )
+            raise
 
     def write_json(self, key: str, payload: Dict[str, Any]):
-        self.s3.put_object(
-            Bucket=self.bucket,
-            Key=key,
-            Body=json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
-            ContentType="application/json",
+        logger.info("event=s3_write_json bucket=%s key=%s", self.bucket, key)
+        payload_bytes = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        logger.debug(
+            "event=s3_write_json_payload bucket=%s key=%s size_bytes=%s",
+            self.bucket,
+            key,
+            len(payload_bytes),
         )
+        try:
+            self.s3.put_object(
+                Bucket=self.bucket,
+                Key=key,
+                Body=payload_bytes,
+                ContentType="application/json",
+            )
+        except Exception:
+            logger.exception(
+                "event=s3_write_json_error bucket=%s key=%s",
+                self.bucket,
+                key,
+            )
+            raise
 
     def copy_object(self, source_key: str, dest_key: str):
-        self.s3.copy_object(
-            Bucket=self.bucket,
-            Key=dest_key,
-            CopySource={"Bucket": self.bucket, "Key": source_key},
+        logger.info(
+            "event=s3_copy_object bucket=%s source_key=%s dest_key=%s",
+            self.bucket,
+            source_key,
+            dest_key,
         )
+        logger.debug(
+            "event=s3_copy_object_metadata bucket=%s source_key=%s dest_key=%s",
+            self.bucket,
+            source_key,
+            dest_key,
+        )
+        try:
+            self.s3.copy_object(
+                Bucket=self.bucket,
+                Key=dest_key,
+                CopySource={"Bucket": self.bucket, "Key": source_key},
+            )
+        except Exception:
+            logger.exception(
+                "event=s3_copy_object_error bucket=%s source_key=%s dest_key=%s",
+                self.bucket,
+                source_key,
+                dest_key,
+            )
+            raise
 
 
 @dataclass
@@ -354,13 +407,34 @@ class ShadowTester:
         key_legacy = legacy_key(self.cfg.request_id, self.cfg.ref_id)
         key_satsource = satsource_key(self.cfg.request_id, self.cfg.ref_id)
 
+        logger.info(
+            "event=shadow_tester_load_json stage=legacy bucket=%s key=%s",
+            self.cfg.bucket,
+            key_legacy,
+        )
         legacy_json = self.loader.load_json(key_legacy)
+        logger.info(
+            "event=shadow_tester_load_json stage=satsource bucket=%s key=%s",
+            self.cfg.bucket,
+            key_satsource,
+        )
         v6_json = self.loader.load_json(key_satsource)
-        
+
         path_tolerances: Dict[str, FieldTolerance] = {}
         if self.cfg.tolerance_config_key:
+            logger.info(
+                "event=shadow_tester_load_tolerance bucket=%s key=%s",
+                self.cfg.bucket,
+                self.cfg.tolerance_config_key,
+            )
             tolerance_raw = self.loader.load_json(self.cfg.tolerance_config_key)
             path_tolerances = _parse_tolerance_config(tolerance_raw)
+            logger.info(
+                "event=shadow_tester_tolerance_applied bucket=%s key=%s tolerance_count=%s",
+                self.cfg.bucket,
+                self.cfg.tolerance_config_key,
+                len(path_tolerances),
+            )
 
         options = CompareOptions(
             epsilon=self.cfg.epsilon,
@@ -372,6 +446,14 @@ class ShadowTester:
         )
         comparator = JsonComparator(options)
         comparator.compare(v6_json, legacy_json, "$")
+        difference_count = len(comparator.diffs)
+        logger.info(
+            "event=shadow_tester_diff_complete request_id=%s ref_id=%s bucket=%s difference_count=%s",
+            self.cfg.request_id,
+            self.cfg.ref_id,
+            self.cfg.bucket,
+            difference_count,
+        )
 
         result = {
             "requestId": self.cfg.request_id,
@@ -384,13 +466,36 @@ class ShadowTester:
 
         if self.cfg.write_report:
             report_key = diff_report_key(self.cfg.request_id, self.cfg.ref_id)
+            logger.info(
+                "event=shadow_tester_write_report bucket=%s request_id=%s ref_id=%s key=%s",
+                self.cfg.bucket,
+                self.cfg.request_id,
+                self.cfg.ref_id,
+                report_key,
+            )
             self.loader.write_json(report_key, result)
             result["reportKey"] = report_key
 
             nextgen_key = nextgen_archive_key(self.cfg.request_id, self.cfg.ref_id)
             legacy_archive = legacy_archive_key(self.cfg.request_id, self.cfg.ref_id)
             if hasattr(self.loader, "copy_object"):
+                logger.info(
+                    "event=shadow_tester_copy nextgen bucket=%s request_id=%s ref_id=%s source=%s dest=%s",
+                    self.cfg.bucket,
+                    self.cfg.request_id,
+                    self.cfg.ref_id,
+                    key_satsource,
+                    nextgen_key,
+                )
                 self.loader.copy_object(key_satsource, nextgen_key)
+                logger.info(
+                    "event=shadow_tester_copy legacy bucket=%s request_id=%s ref_id=%s source=%s dest=%s",
+                    self.cfg.bucket,
+                    self.cfg.request_id,
+                    self.cfg.ref_id,
+                    key_legacy,
+                    legacy_archive,
+                )
                 self.loader.copy_object(key_legacy, legacy_archive)
                 result["nextgenCopyKey"] = nextgen_key
                 result["legacyCopyKey"] = legacy_archive

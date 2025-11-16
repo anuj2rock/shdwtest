@@ -3,6 +3,7 @@ import sys
 import types
 import pytest
 import json
+import logging
 from shadow_lambda import (
     CompareOptions,
     FieldTolerance,
@@ -111,6 +112,49 @@ def test_shadow_tester_writes_report_only_when_enabled(monkeypatch):
     assert len(created_loaders[1].write_calls) == 1
     assert "reportKey" in result_enabled
 
+
+def test_shadow_tester_logs_high_level_steps(monkeypatch, caplog):
+    events = {"loads": []}
+
+    class DummyLoader:
+        def __init__(self, bucket):
+            self.bucket = bucket
+
+        def load_json(self, key):
+            events["loads"].append(key)
+            if key == "tolerance.json":
+                return {"$.path": {"epsilon": 1}}
+            return {"value": key}
+
+        def write_json(self, key, payload):
+            events["write"] = key
+
+        def copy_object(self, source, dest):
+            events.setdefault("copies", []).append((source, dest))
+
+    monkeypatch.setattr(shadow_lambda, "S3JsonLoader", DummyLoader)
+    cfg = shadow_lambda.ShadowTestConfig(
+        bucket="bucket",
+        request_id="req",
+        ref_id="ref",
+        write_report=True,
+        tolerance_config_key="tolerance.json",
+    )
+
+    tester = shadow_lambda.ShadowTester(cfg)
+    with caplog.at_level(logging.INFO, logger="shadow_lambda"):
+        tester.run()
+
+    info_messages = " ".join(r.message for r in caplog.records if r.levelno == logging.INFO)
+    assert "event=shadow_tester_load_json stage=legacy" in info_messages
+    assert "event=shadow_tester_load_json stage=satsource" in info_messages
+    assert "event=shadow_tester_load_tolerance" in info_messages
+    assert "event=shadow_tester_tolerance_applied" in info_messages
+    assert "event=shadow_tester_diff_complete" in info_messages
+    assert "event=shadow_tester_write_report" in info_messages
+    assert "event=shadow_tester_copy nextgen" in info_messages
+    assert "event=shadow_tester_copy legacy" in info_messages
+
 # Provide a lightweight stand-in for boto3 so importing shadow_lambda does not
 # fail in environments where boto3 is unavailable during tests.
 stub_boto3 = types.ModuleType("boto3")
@@ -122,6 +166,69 @@ def _unused_client(*args, **kwargs):  # pragma: no cover - defensive stub
 
 stub_boto3.client = _unused_client
 sys.modules.setdefault("boto3", stub_boto3)
+
+
+def test_s3_json_loader_logs_success_and_error(monkeypatch, caplog):
+    class FakeBody:
+        def __init__(self, payload: bytes):
+            self._payload = payload
+
+        def read(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self):
+            self.fail_get = False
+            self.fail_put = False
+            self.fail_copy = False
+
+        def get_object(self, **kwargs):
+            if self.fail_get:
+                raise ValueError("boom get")
+            return {"Body": FakeBody(b"{}")}
+
+        def put_object(self, **kwargs):
+            if self.fail_put:
+                raise ValueError("boom put")
+
+        def copy_object(self, **kwargs):
+            if self.fail_copy:
+                raise ValueError("boom copy")
+
+    fake_client = FakeClient()
+
+    def _client_factory(service_name):
+        assert service_name == "s3"
+        return fake_client
+
+    monkeypatch.setattr(
+        shadow_lambda,
+        "boto3",
+        types.SimpleNamespace(client=_client_factory),
+    )
+
+    loader = shadow_lambda.S3JsonLoader("bucket")
+
+    with caplog.at_level(logging.DEBUG, logger="shadow_lambda"):
+        loader.load_json("legacy.json")
+        loader.write_json("report.json", {"a": 1})
+        loader.copy_object("legacy.json", "archive.json")
+
+    info_messages = [r.message for r in caplog.records if r.levelno == logging.INFO]
+    debug_messages = [r.message for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any("event=s3_load_json" in msg for msg in info_messages)
+    assert any("event=s3_write_json" in msg for msg in info_messages)
+    assert any("event=s3_copy_object" in msg for msg in info_messages)
+    assert any("event=s3_load_json_payload" in msg for msg in debug_messages)
+    assert any("event=s3_write_json_payload" in msg for msg in debug_messages)
+
+    fake_client.fail_get = True
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="shadow_lambda"):
+        with pytest.raises(ValueError):
+            loader.load_json("boom.json")
+    error_messages = [r.message for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("event=s3_load_json_error" in msg for msg in error_messages)
 
 
 def _collect_issues(diffs):
