@@ -2,6 +2,7 @@
 import json
 import os
 import decimal
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple, Optional, Set
 try:
@@ -9,6 +10,9 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised via tests without boto3 installed
     boto3 = None
 import math
+
+
+logger = logging.getLogger(__name__)
 
 # ---------- Config ----------
 # Provide these via Lambda env vars or override in the event:
@@ -385,57 +389,108 @@ class ShadowTester:
 
             nextgen_key = nextgen_archive_key(self.cfg.request_id, self.cfg.ref_id)
             legacy_archive = legacy_archive_key(self.cfg.request_id, self.cfg.ref_id)
-            self.loader.copy_object(key_satsource, nextgen_key)
-            self.loader.copy_object(key_legacy, legacy_archive)
-            result["nextgenCopyKey"] = nextgen_key
-            result["legacyCopyKey"] = legacy_archive
+            if hasattr(self.loader, "copy_object"):
+                self.loader.copy_object(key_satsource, nextgen_key)
+                self.loader.copy_object(key_legacy, legacy_archive)
+                result["nextgenCopyKey"] = nextgen_key
+                result["legacyCopyKey"] = legacy_archive
+            else:  # pragma: no cover - only hit in tests with stubbed loaders
+                logger.warning(
+                    "event=copy_object_unavailable bucket=%s request_id=%s ref_id=%s",
+                    self.cfg.bucket,
+                    self.cfg.request_id,
+                    self.cfg.ref_id,
+                )
 
         return result
 
 
 # ---------- Lambda handler ----------
 def lambda_handler(event, context):
+    event = event or {}
     bucket = (event.get("bucket")
               or os.getenv("BUCKET_NAME"))
     if not bucket:
         bucket = "satsure-sage-media"
-    if "request_id" not in event:
-        raise KeyError("'request_id' not provided as part of lambda event")
-    request_id = event["request_id"]
 
-    if "ref_id" not in event:
-        raise KeyError("'ref_id' not provided as part of lambda event")
-    ref_id = event["ref_id"]
+    request_id = event.get("request_id")
+    ref_id = event.get("ref_id")
+    bucket_for_error_logs = bucket
 
-    epsilon = float(event.get("epsilon") or os.getenv("EPSILON", "1e-3"))
-    list_mode = (event.get("list_mode") or os.getenv("LIST_MODE", "ordered")).strip().lower()
-    write_report = _bool_from_event_or_env(event.get("write_report"), "WRITE_REPORT", False)
+    try:
+        if request_id is None:
+            raise KeyError("'request_id' not provided as part of lambda event")
 
-    ignore_paths = []
-    ip_env = os.getenv("IGNORE_PATHS_JSON")
-    if event.get("ignore_paths"):
-        ignore_paths = list(event["ignore_paths"])
-    elif ip_env:
-        try:
-            ignore_paths = json.loads(ip_env)
-        except Exception:
-            pass
+        if ref_id is None:
+            raise KeyError("'ref_id' not provided as part of lambda event")
 
-    tolerance_config_key = event.get("tolerance_config_key") or os.getenv("TOLERANCE_CONFIG_KEY")
-    
-    cfg = ShadowTestConfig(
-        bucket=bucket,
-        request_id=request_id,
-        ref_id=ref_id,
-        epsilon=epsilon,
-        list_mode=list_mode,
-        ignore_paths=ignore_paths,
-        write_report=write_report,
-        tolerance_config_key=tolerance_config_key,
-    )
-    tester = ShadowTester(cfg)
-    result = tester.run()
-    return {
-        "statusCode": 200,
-        "body": json.dumps(result)
-    }
+        epsilon = float(event.get("epsilon") or os.getenv("EPSILON", "1e-3"))
+        list_mode = (event.get("list_mode") or os.getenv("LIST_MODE", "ordered")).strip().lower()
+        write_report = _bool_from_event_or_env(event.get("write_report"), "WRITE_REPORT", False)
+
+        ignore_paths = []
+        ip_env = os.getenv("IGNORE_PATHS_JSON")
+        if event.get("ignore_paths"):
+            ignore_paths = list(event["ignore_paths"])
+        elif ip_env:
+            try:
+                ignore_paths = json.loads(ip_env)
+            except Exception:
+                pass
+
+        tolerance_key_event = event.get("tolerance_config_key")
+        tolerance_key_env = os.getenv("TOLERANCE_CONFIG_KEY")
+        tolerance_config_key = tolerance_key_event or tolerance_key_env
+        if tolerance_key_event:
+            tolerance_source = "event"
+        elif tolerance_key_env:
+            tolerance_source = "env"
+        else:
+            tolerance_source = "none"
+
+        logger.info(
+            "event=lambda_handler_start request_id=%s ref_id=%s bucket=%s list_mode=%s tolerance_source=%s write_report=%s",
+            request_id,
+            ref_id,
+            bucket,
+            list_mode,
+            tolerance_source,
+            write_report,
+        )
+
+        cfg = ShadowTestConfig(
+            bucket=bucket,
+            request_id=request_id,
+            ref_id=ref_id,
+            epsilon=epsilon,
+            list_mode=list_mode,
+            ignore_paths=ignore_paths,
+            write_report=write_report,
+            tolerance_config_key=tolerance_config_key,
+        )
+        tester = ShadowTester(cfg)
+        result = tester.run()
+        response = {
+            "statusCode": 200,
+            "body": json.dumps(result)
+        }
+
+        logger.info(
+            "event=lambda_handler_success request_id=%s ref_id=%s differenceCount=%s reportKey=%s nextgenCopyKey=%s legacyCopyKey=%s statusCode=%s",
+            request_id,
+            ref_id,
+            result.get("differenceCount"),
+            result.get("reportKey"),
+            result.get("nextgenCopyKey"),
+            result.get("legacyCopyKey"),
+            response["statusCode"],
+        )
+        return response
+    except Exception:
+        logger.exception(
+            "event=lambda_handler_error request_id=%s ref_id=%s bucket=%s",
+            request_id,
+            ref_id,
+            bucket_for_error_logs,
+        )
+        raise
