@@ -11,8 +11,13 @@ except ModuleNotFoundError:  # pragma: no cover - exercised via tests without bo
     boto3 = None
 import math
 
+# Configure module logging at import time so Lambda cold starts set the level
+# before any logging occurs.
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=logging.INFO)
 
 logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
 
 # ---------- Config ----------
 # Provide these via Lambda env vars or override in the event:
